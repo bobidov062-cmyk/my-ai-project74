@@ -1,0 +1,139 @@
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import axios from "axios";
+import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
+
+dotenv.config(); // Load environment variables from .env
+
+// =============================================
+// API keys are now loaded from environment variables
+// =============================================
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const OPENAI_KEY = process.env.OPENAI_KEY;
+const GROQ_KEY = process.env.GROQ_KEY;
+const GOOGLE_VISION_KEY = process.env.GOOGLE_VISION_KEY;
+const DOCUMENT_API_KEY = process.env.DOCUMENT_API_KEY; // optional
+const ZAMZAR_KEY = process.env.ZAMZAR_KEY; // optional
+
+// Express
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// File upload memory handler
+const upload = multer({ storage: multer.memoryStorage() });
+
+// =============================================
+// GOOGLE OCR
+// =============================================
+async function googleOCR(base64) {
+const url = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_KEY}`;
+
+const res = await axios.post(url, {
+requests: [
+{
+image: { content: base64 },
+features: [{ type: "DOCUMENT_TEXT_DETECTION" }]
+}
+]
+});
+
+return res.data.responses[0]?.fullTextAnnotation?.text || "";
+}
+
+// Clean extracted text
+function normalizeText(text) {
+return text.replace(/\s+/g, " ").trim();
+}
+
+// Prompt for AI workflow
+function workflowPrompt(rawText) {
+return `
+You are an enterprise-level AI accounting system.
+
+Extract:
+
+* invoice data
+* totals
+* taxes
+* categories
+* vendor / customer
+* due dates
+* expenses
+* payroll
+* recommended accounting entries
+* tasks for the owner
+
+Document:
+${rawText}
+
+Return STRICT JSON ONLY.
+`;
+}
+
+// =============================================
+// 1) UPLOAD + OCR
+// =============================================
+app.post("/upload", upload.single("file"), async (req, res) => {
+try {
+const base64 = req.file.buffer.toString("base64");
+const text = await googleOCR(base64);
+
+```
+res.json({
+  success: true,
+  text: normalizeText(text)
+});
+```
+
+} catch (err) {
+res.status(500).json({ success: false, error: err.message });
+}
+});
+
+// =============================================
+// 2) ANALYZE TEXT WITH OPENAI
+// =============================================
+app.post("/analyze", async (req, res) => {
+try {
+const { text } = req.body;
+
+```
+const response = await axios.post(
+  "https://api.openai.com/v1/chat/completions",
+  {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "You are an expert accountant AI." },
+      { role: "user", content: workflowPrompt(text) }
+    ],
+    response_format: { type: "json_object" }
+  },
+  {
+    headers: { 
+      Authorization: `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json"
+    }
+  }
+);
+
+const result = response.data.choices[0].message.content;
+
+res.json({
+  success: true,
+  result: JSON.parse(result)
+});
+```
+
+} catch (err) {
+res.status(500).json({ success: false, error: err.message });
+}
+});
+
+// =============================================
+// Start server
+// =============================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
